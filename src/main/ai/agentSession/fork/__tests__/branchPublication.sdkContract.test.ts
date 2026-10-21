@@ -12,7 +12,9 @@ import { agentTable } from '@data/db/schemas/agent'
 import { agentSessionTable } from '@data/db/schemas/agentSession'
 import { agentSessionMessageTable } from '@data/db/schemas/agentSessionMessage'
 import { agentWorkspaceTable } from '@data/db/schemas/agentWorkspace'
+import { agentSessionContextService as contexts } from '@data/services/AgentSessionContextService'
 import { agentSessionMessageService as messages } from '@data/services/AgentSessionMessageService'
+import { preparePiBranch } from '@main/ai/runtime/pi/piContext'
 import { preparePiBranch, reservePiBranchTx } from '@main/ai/runtime/pi/piContext'
 import { forkPiSession } from '@main/ai/runtime/pi/piFork'
 import { resolveResumeTokenSessionFile } from '@main/ai/runtime/pi/piSessionFile'
@@ -132,11 +134,18 @@ describe('Pi branch publication with native files', () => {
         }
       )
     }
+    const originalContext = preparePiBranch('product', old.id, source.getSessionId())
+    messages.prepareSubmission('product', old.id, originalContext.id, 'reject')
+    const originalSubmission = messages.readSubmission('product', old.id).submission
     const first = await edit(old.id)
+    expect(messages.readSubmission('product', old.id).submission).toEqual(originalSubmission)
+    expect(messages.hasSubmission('product', first.row.id)).toBe(false)
     const child = SessionManager.open(resolveResumeTokenSessionFile(first.nativeId, sessions)!, sessions, directory)
     expect(JSON.stringify(child.buildSessionContext().messages)).toContain('Shared answer')
     expect(JSON.stringify(child.buildSessionContext().messages)).not.toContain('Old question')
     child.appendMessage({ role: 'user', content: 'Edited question', timestamp: Date.now() })
+    const childContext = preparePiBranch('product', first.row.id, first.nativeId)
+    messages.prepareSubmission('product', first.row.id, childContext.id, 'reject')
     const childAnswer = answer('Edited answer', child)
     messages.selectBranch('product', old.id)
     expect(messages.getLastRuntimeResumeToken('product')).toBe(source.getSessionId())
@@ -146,6 +155,8 @@ describe('Pi branch publication with native files', () => {
     expect(messages.listSessionMessages('product').items[0].id).toBe(childAnswer.id)
     const second = await edit(first.row.id)
     expect(second.nativeId).not.toBe(first.nativeId)
+    expect(messages.hasSubmission('product', first.row.id)).toBe(true)
+    expect(messages.hasSubmission('product', second.row.id)).toBe(false)
     expect(await readFile(source.getSessionFile()!, 'utf8')).toBe(originalFile)
     expect(
       dbh.db.select().from(agentSessionMessageTable).where(eq(agentSessionMessageTable.id, shared.id)).get()

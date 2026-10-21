@@ -219,9 +219,10 @@ export class AgentSessionDeliveryRoutingError extends Error {
   }
 }
 
-type SaveAgentSessionMessageOptions =
+type SaveAgentSessionMessageOptions = { inputResponses?: readonly InputState[] } & (
   | { db: DbOrTx; publishDataChange?: never }
   | { db?: undefined; publishDataChange?: boolean }
+)
 
 type SavedAgentSessionMessage = {
   entity: AgentSessionMessageEntity
@@ -368,6 +369,23 @@ export class AgentSessionMessageService {
         .run()
       if (result.changes !== 1) throw new Error('Session message changed during relocation')
     }
+  }
+
+  hasContextSubmission(sessionId: string, contextId: string): boolean {
+    return Boolean(
+      application
+        .get('DbService')
+        .getDb()
+        .select({ id: sessionMessagesTable.id })
+        .from(sessionMessagesTable)
+        .where(
+          and(
+            eq(sessionMessagesTable.sessionId, sessionId),
+            sql`json_extract(${sessionMessagesTable.submission}, '$.contextId') = ${contextId}`
+          )
+        )
+        .get()
+    )
   }
 
   hasSubmission(sessionId: string, messageId: string): boolean {
@@ -527,7 +545,7 @@ export class AgentSessionMessageService {
     const rows = readAgentSessionPath(tx, sessionId)
     const index = rows.findIndex((row) => row.id === messageId)
     const user = rows[index]
-    if (!user || user.role !== 'user' || user.delivery || user.submission || source.session.type !== 'conversation')
+    if (!user || user.role !== 'user' || user.delivery || source.session.type !== 'conversation')
       throw new AgentSessionEditError('invalid_target')
     if (
       tx
@@ -1516,8 +1534,16 @@ export class AgentSessionMessageService {
   ): AgentSessionMessageEntity {
     const { db, publishDataChange } = options
     const timestampMs = Date.now()
-    if (db) return this.saveMessageTx(db, params, timestampMs).entity
-    const result = application.get('DbService').withWriteTx((tx) => this.saveMessageTx(tx, params, timestampMs))
+    const persist = (tx: DbOrTx) => {
+      const saved = this.saveMessageTx(tx, params, timestampMs)
+      for (const input of options.inputResponses ?? []) {
+        if (!input.inputId) throw new Error('Response association requires an input identity')
+        this.mergeSubmissionTx(tx, params.sessionId, input.inputId, input, saved.entity.id)
+      }
+      return saved
+    }
+    if (db) return persist(db).entity
+    const result = application.get('DbService').withWriteTx(persist)
     if (result.entity.role === 'assistant') {
       aiUsageRecordService.refreshMessageProjection({ kind: 'agent-session', id: result.entity.id })
     }
