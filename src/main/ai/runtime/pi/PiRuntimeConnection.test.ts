@@ -148,7 +148,6 @@ describe('desktop Pi root connection', () => {
         authType: 'api-key',
         isEnabled: true
       }),
-      enabledApiKeys: [],
       additionalSkillPaths: [],
       mcpServerSnapshots: new Map(),
       linkedChannel: null,
