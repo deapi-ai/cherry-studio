@@ -21,11 +21,11 @@ import { usePersistCache } from '@data/hooks/useCache'
 import { usePreference } from '@data/hooks/usePreference'
 import useAvatar from '@renderer/hooks/useAvatar'
 import { useCherryAccountSession } from '@renderer/hooks/useCherryAccountSession'
+import { useCherryCloudPlans } from '@renderer/hooks/useCherryCloudPlans'
 import { useSidebarShortcuts } from '@renderer/hooks/useSidebarShortcuts'
 import { ipcApi } from '@renderer/ipc'
 import { openSettingsTab } from '@renderer/services/mainWindowNavigation'
 import { toast } from '@renderer/services/toast'
-import { getAppEdition } from '@renderer/utils/appEdition'
 import { isMac } from '@renderer/utils/platform'
 
 import { CommandTooltip } from '../command'
@@ -76,7 +76,7 @@ export default function Sidebar({
   const { status: accountStatus } = useCherryAccountSession()
   const accountId = accountStatus?.phase === 'signed-in' ? accountStatus.accountId : null
   useSWR(
-    getAppEdition() === 'global' && accountId ? ['cherry-cloud/account-plans', accountId] : null,
+    accountId ? ['cherry-cloud/account-plans', accountId] : null,
     () => ipcApi.request('cherry_cloud.account_plans.get'),
     { shouldRetryOnError: false }
   )
@@ -114,6 +114,12 @@ export default function Sidebar({
   }, [layout])
 
   const avatar = useAvatar()
+  const [subscribePromptSeen] = usePersistCache('ui.cherry_cloud.subscribe_prompt_seen')
+  const { session: cloudSession, plansQuery, activePaid } = useCherryCloudPlans(!subscribePromptSeen)
+  // Wait for the plans of a signed-in account so a paying user never sees the dot flash.
+  const showSubscribeDot =
+    !subscribePromptSeen &&
+    (cloudSession.status?.phase === 'signed-out' || (plansQuery.data !== undefined && !activePaid))
   const handleUserMenuOpenChange = useCallback(
     (open: boolean) => {
       setUserMenuOpen(open)
@@ -136,9 +142,10 @@ export default function Sidebar({
     () => ({
       name: userName || t('chat.user', { defaultValue: t('export.user', { defaultValue: 'User' }) }),
       avatar: avatar || undefined,
+      badgeLabel: showSubscribeDot ? t('settings.subscription.go_to_subscribe') : undefined,
       onClick: handleUserMenuToggle
     }),
-    [avatar, handleUserMenuToggle, t, userName]
+    [avatar, handleUserMenuToggle, showSubscribeDot, t, userName]
   )
   const renderSidebarUserTrigger = useCallback(
     (trigger: ReactElement) => (
