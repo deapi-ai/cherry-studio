@@ -118,4 +118,6 @@ export const cherryCloudRequestSchemas = {
 
 export type CherryCloudEventSchemas = {
   'cherry_cloud.status_changed': CherryCloudStatus
+  // A subscription notification changed entitlements; main has already refreshed the account and models.
+  'cherry_cloud.account_refreshed': void
 }

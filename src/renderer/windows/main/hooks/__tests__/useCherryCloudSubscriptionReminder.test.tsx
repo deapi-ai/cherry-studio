@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { SWRConfig } from 'swr'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 
 import { useCherryCloudModelAvailability } from '@renderer/hooks/useCherryCloudModelAvailability'
 import { toast } from '@renderer/services/toast'
@@ -102,6 +102,37 @@ describe('useCherryCloudSubscriptionReminder', () => {
         routes.lastIndexOf('cherry_cloud.account_plans.get')
       )
     })
+  })
+
+  it('refetches plans and model availability when main reports a refreshed account', async () => {
+    let publishRefresh = () => {}
+    const defaultOn = vi.mocked(window.api.ipcApi.on).getMockImplementation()
+    vi.mocked(window.api.ipcApi.on).mockImplementation((event, handler) => {
+      if (event === 'cherry_cloud.account_refreshed') publishRefresh = () => handler(undefined)
+      return () => {}
+    })
+    onTestFinished(() => {
+      if (defaultOn) vi.mocked(window.api.ipcApi.on).mockImplementation(defaultOn)
+    })
+    status = signedIn('account-1')
+    plans = unpaid()
+    renderHook(
+      () => {
+        useCherryCloudSubscriptionReminder()
+        useCherryCloudModelAvailability()
+      },
+      { wrapper }
+    )
+    await waitFor(() => expect(plansRequests()).toBe(1))
+    const syncs = () => request.mock.calls.filter(([route]) => route === 'cherry_cloud.models.sync').length
+    const syncsBefore = syncs()
+
+    plans = paid('Plus')
+    await act(async () => publishRefresh())
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Plus 已生效'))
+    expect(plansRequests()).toBe(2)
+    expect(syncs()).toBeGreaterThan(syncsBefore)
   })
 
   it('stays quiet for an account that was already subscribed', async () => {
