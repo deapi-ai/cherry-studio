@@ -234,8 +234,8 @@ export function normalizeAnthropicThinkingOptions(
 }
 
 /**
- * Convert a total-token cap into the answer allowance for caller-owned Anthropic
- * Messages paths that still reserve a numeric thinking budget, with a floor of 1.
+ * Convert a total-token cap into the answer allowance for Anthropic-endpoint
+ * paths without a serialized-body clamp, with a floor of 1.
  * Without a numeric budget, keep the cap unchanged.
  */
 export function adjustMaxOutputTokensForReasoning(

@@ -729,6 +729,12 @@ function buildAgentOptions(
     request.fastMode === true
   )
   const normalizeThinking = endpointType === ENDPOINT_TYPE.ANTHROPIC_MESSAGES && request.contextOwner !== 'caller'
+  const serializesAnthropicMessagesHttpBody =
+    endpointType === ENDPOINT_TYPE.ANTHROPIC_MESSAGES &&
+    aiSdkProviderId !== 'bedrock' &&
+    ['anthropic', 'azure-anthropic', 'google-vertex-anthropic', 'cherryin', 'newapi', 'aihubmix', 'dmxapi'].includes(
+      sdkConfig.providerId
+    )
   const cap = requestedMaxOutputTokens ?? model.maxOutputTokens
   if (normalizeThinking) {
     const normalized = normalizeAnthropicThinkingOptions(
@@ -739,15 +745,16 @@ function buildAgentOptions(
     )
     effectiveProviderOptions = normalized.providerOptions
   }
-  const maxOutputTokens = normalizeThinking
-    ? requestedMaxOutputTokens
-    : adjustMaxOutputTokensForReasoning(requestedMaxOutputTokens, endpointType, {
-        budgetTokens: resolveEffectiveThinkingBudget(
-          effectiveProviderOptions,
-          sdkConfig.providerOptionsKey,
-          reasoning.budgetTokens
-        )
-      })
+  const maxOutputTokens =
+    normalizeThinking && serializesAnthropicMessagesHttpBody
+      ? requestedMaxOutputTokens
+      : adjustMaxOutputTokensForReasoning(requestedMaxOutputTokens, endpointType, {
+          budgetTokens: resolveEffectiveThinkingBudget(
+            effectiveProviderOptions,
+            sdkConfig.providerOptionsKey,
+            reasoning.budgetTokens
+          )
+        })
   if (maxOutputTokens !== undefined) {
     standardParams = { ...standardParams, maxOutputTokens }
   } else if ('maxOutputTokens' in standardParams) {
@@ -759,7 +766,7 @@ function buildAgentOptions(
     { standardParams, providerOptions: effectiveProviderOptions, bodyParams },
     model
   )
-  if (normalizeThinking) {
+  if (normalizeThinking && serializesAnthropicMessagesHttpBody) {
     sdkConfig.providerSettings.fetch = createThinkingBodyFetch(
       sdkConfig.providerSettings.fetch ?? globalThis.fetch,
       cap

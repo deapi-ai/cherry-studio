@@ -1,5 +1,6 @@
 import path from 'node:path'
 
+import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock'
 import { createAnthropic } from '@ai-sdk/anthropic'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
@@ -629,6 +630,110 @@ describe('buildAgentParams provider resolution', () => {
     expect(receivedCustomParameterSets).toEqual(expectedCustomParameterSets)
     expect(requestFetches[2]).toBe(requestFetches[0])
     expect(requestFetches[1]).not.toBe(requestFetches[0])
+  })
+})
+
+describe('Bedrock thinking final request body', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  // Catch the Converse SDK adding thinking on top of the user's total allowance.
+  it.each([
+    { configuredCap: 10000, expectedBudget: 9999 },
+    { configuredCap: undefined, expectedBudget: 51404 },
+    { configuredCap: 10000, expectedBudget: 9999, runtimeProviderId: 'bedrock', adapterFamily: 'anthropic' },
+    { configuredCap: 10000, expectedBudget: 9999, runtimeProviderId: 'anthropic', adapterFamily: 'bedrock' },
+    { configuredCap: 10000, expectedBudget: 9999, runtimeProviderId: 'future-converse', adapterFamily: 'anthropic' },
+    { configuredCap: 10000, expectedBudget: 2048, budgetOverride: 2048 }
+  ])('reserves high reasoning within the cap: %j', async (scenario) => {
+    const {
+      configuredCap,
+      expectedBudget,
+      runtimeProviderId = 'bedrock',
+      adapterFamily = 'bedrock',
+      budgetOverride
+    } = scenario
+    const bodies: Record<string, unknown>[] = []
+    const urls: string[] = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      urls.push(String(input))
+      bodies.push(JSON.parse(String(init?.body)))
+      throw new Error('Bedrock request captured')
+    })
+    resolveProviderAiSdkConfigMock.mockResolvedValue({
+      config: { providerId: runtimeProviderId, providerSettings: {} },
+      credentialReceipt: { attribution: 'unknown' }
+    })
+    const modelId = 'global.anthropic.claude-sonnet-4-5-20250929-v1:0'
+    const result = await buildAgentParams({
+      request: {
+        conversation: CONVERSATION,
+        callOverrides: {
+          providerOptions: {
+            ...(runtimeProviderId !== 'bedrock' && {
+              bedrock: { reasoningConfig: { type: 'enabled', budgetTokens: expectedBudget } }
+            }),
+            ...(budgetOverride !== undefined && {
+              bedrock: {
+                thinking: { type: 'enabled', budgetTokens: budgetOverride },
+                reasoningConfig: { type: 'enabled', budgetTokens: budgetOverride }
+              }
+            })
+          }
+        }
+      },
+      signal: undefined,
+      provider: makeProvider({
+        id: 'aws-bedrock',
+        defaultChatEndpoint: ENDPOINT_TYPE.ANTHROPIC_MESSAGES,
+        endpointConfigs: { [ENDPOINT_TYPE.ANTHROPIC_MESSAGES]: { adapterFamily } }
+      }),
+      model: makeModel({
+        id: 'aws-bedrock::claude-sonnet-4-5',
+        presetModelId: 'claude-sonnet-4-5',
+        apiModelId: modelId,
+        providerId: 'aws-bedrock',
+        maxOutputTokens: 64000,
+        capabilities: [MODEL_CAPABILITY.REASONING],
+        reasoning: { controls: [{ kind: 'budget', min: 1024, max: 64000 }], selectableEfforts: ['low', 'high'] }
+      }),
+      assistant: makeAssistant({
+        settings: {
+          enableMaxTokens: configuredCap !== undefined,
+          maxTokens: configuredCap,
+          reasoning_effort: 'high'
+        }
+      })
+    })
+    const settings = { region: 'us-east-1', apiKey: 'test-bedrock-key' }
+    const call = {
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+      maxOutputTokens: result.options.maxOutputTokens,
+      providerOptions: result.options.providerOptions
+    } satisfies LanguageModelV3CallOptions
+    // No fetch option: prove the pinned SDK reaches globalThis.fetch itself.
+    await expect(createAmazonBedrock(settings).languageModel(modelId).doStream(call)).rejects.toThrow(
+      'Bedrock request captured'
+    )
+    await expect(
+      createAmazonBedrock({ ...settings, fetch: result.sdkConfig.providerSettings.fetch })
+        .languageModel(modelId)
+        .doStream(call)
+    ).rejects.toThrow('Bedrock request captured')
+    expect(urls).toEqual([
+      `https://bedrock-runtime.us-east-1.amazonaws.com/model/${encodeURIComponent(modelId)}/converse-stream`,
+      `https://bedrock-runtime.us-east-1.amazonaws.com/model/${encodeURIComponent(modelId)}/converse-stream`
+    ])
+    const expected = {
+      inferenceConfig: { maxTokens: configuredCap ?? 64000 },
+      additionalModelRequestFields: { thinking: { type: 'enabled', budget_tokens: expectedBudget } }
+    }
+    expect(bodies).toHaveLength(2)
+    for (const body of bodies) expect(body).toMatchObject(expected)
+    expect(bodies[1]).toEqual(bodies[0])
+    expect(result.options.providerOptions?.bedrock?.reasoningConfig).toEqual({
+      type: 'enabled',
+      budgetTokens: expectedBudget
+    })
   })
 })
 
