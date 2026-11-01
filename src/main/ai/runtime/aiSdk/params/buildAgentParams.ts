@@ -730,7 +730,6 @@ function buildAgentOptions(
   )
   const normalizeThinking = endpointType === ENDPOINT_TYPE.ANTHROPIC_MESSAGES && request.contextOwner !== 'caller'
   const cap = requestedMaxOutputTokens ?? model.maxOutputTokens
-  let effectiveBudgetTokens: number | undefined
   if (normalizeThinking) {
     const normalized = normalizeAnthropicThinkingOptions(
       effectiveProviderOptions,
@@ -739,17 +738,16 @@ function buildAgentOptions(
       cap
     )
     effectiveProviderOptions = normalized.providerOptions
-    effectiveBudgetTokens = normalized.budgetTokens
-  } else {
-    effectiveBudgetTokens = resolveEffectiveThinkingBudget(
-      effectiveProviderOptions,
-      sdkConfig.providerOptionsKey,
-      reasoning.budgetTokens
-    )
   }
-  const maxOutputTokens = adjustMaxOutputTokensForReasoning(requestedMaxOutputTokens, endpointType, {
-    budgetTokens: effectiveBudgetTokens
-  })
+  const maxOutputTokens = normalizeThinking
+    ? requestedMaxOutputTokens
+    : adjustMaxOutputTokensForReasoning(requestedMaxOutputTokens, endpointType, {
+        budgetTokens: resolveEffectiveThinkingBudget(
+          effectiveProviderOptions,
+          sdkConfig.providerOptionsKey,
+          reasoning.budgetTokens
+        )
+      })
   if (maxOutputTokens !== undefined) {
     standardParams = { ...standardParams, maxOutputTokens }
   } else if ('maxOutputTokens' in standardParams) {

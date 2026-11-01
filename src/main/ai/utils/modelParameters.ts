@@ -192,7 +192,8 @@ export function getTimeout(model: Model): number {
   return DEFAULT_TIMEOUT
 }
 
-/** Normalize explicit budgets before the SDK adds the effective budget to the output allowance. */
+/** With a cap, materialize the SDK's implicit 1024 for enabled thinking or clamp a valid explicit budget to cap - 1.
+ * Drop the block if cap - 1 cannot hold 1024; leave invalid explicit budgets untouched. */
 export function normalizeAnthropicThinkingOptions(
   providerOptions: ProviderOptions,
   providerOptionsKey: string,
@@ -233,10 +234,9 @@ export function normalizeAnthropicThinkingOptions(
 }
 
 /**
- * Anthropic Messages providers add the explicit thinking budget on top of
- * `maxOutputTokens`. Cherry Studio's limit is the total generated-token cap,
- * so pass the non-thinking remainder to the SDK. Adaptive thinking has no
- * explicit budget and therefore needs no adjustment.
+ * Convert a total-token cap into the answer allowance for caller-owned Anthropic
+ * Messages paths that still reserve a numeric thinking budget, with a floor of 1.
+ * Without a numeric budget, keep the cap unchanged.
  */
 export function adjustMaxOutputTokensForReasoning(
   maxOutputTokens: number | undefined,

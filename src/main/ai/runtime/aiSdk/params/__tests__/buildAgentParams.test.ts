@@ -27,6 +27,7 @@ import type { ToolEntry } from '../../../../tools/adapters/aiSdk/types'
 import type { AppProviderSettingsMap } from '../../../../types'
 import type { CallOverrides } from '../../../../types/requests'
 import type { AgentOptions } from '../../loop/types'
+import { createCustomParamsFetch } from '../customParamsFetch'
 
 const { preferenceGetMock, resolveProviderAiSdkConfigMock, listMcpServers, listMcpTools, getMcpInstructions } =
   vi.hoisted(() => ({
@@ -645,9 +646,11 @@ describe('Anthropic thinking final request body', () => {
   }
 
   async function capture(scenario: Scenario, contextOwner?: 'caller') {
+    let rawBody: string | undefined
     let body: Record<string, unknown> | undefined
     const innerFetch: typeof globalThis.fetch = async (_input, init) => {
-      body = JSON.parse(String(init?.body))
+      rawBody = String(init?.body)
+      body = JSON.parse(rawBody)
       throw new Error('thinking request captured')
     }
     const sdkProviderId = scenario.dynamic ? 'newapi' : 'anthropic'
@@ -727,7 +730,15 @@ describe('Anthropic thinking final request body', () => {
     } satisfies LanguageModelV3CallOptions
     await expect(sdkModel.doStream(call)).rejects.toThrow('thinking request captured')
     expect(body).toBeDefined()
-    return { body: body!, result, innerFetch, call, modelId }
+    if (contextOwner !== 'caller' && typeof body?.max_tokens === 'number') {
+      const cap = scenario.max ?? scenario.modelCap
+      if (cap !== undefined) expect(body.max_tokens).toBeLessThanOrEqual(cap)
+      const thinking = body.thinking as { budget_tokens?: number } | undefined
+      if (typeof thinking?.budget_tokens === 'number') {
+        expect(body.max_tokens).toBeGreaterThan(thinking.budget_tokens)
+      }
+    }
+    return { body: body!, rawBody, result, innerFetch, call, modelId }
   }
 
   // These outcomes catch SDK budget addition, model ceilings and late raw-body merging.
@@ -756,35 +767,115 @@ describe('Anthropic thinking final request body', () => {
   })
 
   it.each([
+    { modelId: 'claude-sonnet-5-5', max: 1025, expectedMax: 1025 },
+    { modelId: 'claude-sonnet-5-5', max: 4096, expectedMax: 4096 },
+    { modelId: 'claude-sonnet-5-5', max: 128000, expectedMax: 128000 },
+    { modelId: 'claude-sonnet-5-5', max: 256000, expectedMax: 128000 },
+    { modelId: 'claude-opus-5-5', max: 4096, expectedMax: 4096 },
+    { modelId: 'claude-sonnet-5-5', max: 4096, budget: 4000, expectedMax: 4096 },
+    { modelId: 'claude-fable-5-1', max: 1025, expectedMax: 1025 },
+    { modelId: 'claude-fable-5-1', max: 4096, expectedMax: 4096 }
+  ])('preserves the allowance within the SDK ceiling when thinking has no wire budget: %j', async (scenario) => {
+    for (const source of ['call', 'custom', 'assistant'] as const) {
+      const { body, result } = await capture({ ...scenario, source })
+      expect(body.max_tokens).toBe(scenario.expectedMax)
+      expect(body.thinking).toEqual({ type: 'adaptive' })
+      expect(result.options.providerOptions?.anthropic?.thinking).toEqual({
+        type: 'enabled',
+        budgetTokens: scenario.budget ?? 1024
+      })
+    }
+  })
+
+  it.each([
+    { max: 8000, budget: 4000, expectedMax: 8000, expectedBudget: 4000 },
+    { max: 4096, budget: 8191, expectedMax: 4096, expectedBudget: 4095 },
+    { max: 4096, budget: 128000, expectedMax: 4096, expectedBudget: 4095 },
+    { max: 4096, expectedMax: 4096, expectedBudget: 1024 },
+    { max: 1024, expectedMax: 1024, expectedBudget: undefined },
+    { max: 128000, budget: 100000, expectedMax: 64000, expectedBudget: 63999 }
+  ])('keeps budget-model totals and thinking within the requested and SDK limits: %j', async (scenario) => {
+    const { body } = await capture({ ...scenario, modelId: 'claude-sonnet-4-5', source: 'custom' })
+    expect(body.max_tokens).toBe(scenario.expectedMax)
+    expect(body.thinking).toEqual(
+      scenario.expectedBudget === undefined ? undefined : { type: 'enabled', budget_tokens: scenario.expectedBudget }
+    )
+  })
+
+  it('preserves the allowance and implicit budget for effort-dialect models that retain enabled thinking', async () => {
+    const { body } = await capture({ max: 4096, modelId: 'claude-sonnet-4-6', source: 'custom' })
+    expect(body.max_tokens).toBe(4096)
+    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 1024 })
+  })
+
+  it.each(['claude-sonnet-5.5', 'claude-sonnet-latest'])(
+    'caps the serialized body when the SDK retains enabled thinking for %s',
+    async (modelId) => {
+      const { body } = await capture({ max: 4096, modelId, source: 'custom' })
+      expect(body.max_tokens).toBe(4096)
+      expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 1024 })
+    }
+  )
+
+  it.each([
+    { budget: undefined, remainder: 4096 },
+    { budget: 4000, remainder: 96 },
+    { budget: undefined, remainder: 4096, source: 'custom' as const },
+    { budget: 4000, remainder: 96, source: 'custom' as const }
+  ])('preserves every caller-owned adaptive body field with %j', async ({ budget, remainder, source }) => {
+    const { body, rawBody, call, modelId } = await capture(
+      { max: 4096, budget, modelId: 'claude-sonnet-5-5', source },
+      'caller'
+    )
+    expect(body.max_tokens).toBe(remainder)
+    expect(body.thinking).toEqual({ type: 'adaptive' })
+    let baseline: string | undefined
+    const baselineFetch: typeof globalThis.fetch = async (_input, init) => {
+      baseline = String(init?.body)
+      throw new Error('baseline captured')
+    }
+    await expect(
+      createAnthropic({
+        apiKey: 'sk-test',
+        fetch:
+          source === 'custom'
+            ? createCustomParamsFetch(baselineFetch, {
+                thinking: { type: 'enabled', ...(budget !== undefined && { budgetTokens: budget }) }
+              })
+            : baselineFetch
+      })
+        .languageModel(modelId)
+        .doStream({ ...call, maxOutputTokens: remainder })
+    ).rejects.toThrow('baseline captured')
+    expect(JSON.stringify(body)).toBe(baseline)
+    expect(rawBody).toBe(baseline)
+  })
+
+  it.each([
     {
       canonical: { type: 'adaptive' },
       dynamic: { type: 'enabled', budgetTokens: 8191 },
-      expected: { type: 'enabled', budget_tokens: 4095 },
-      remainder: 1
+      expected: { type: 'enabled', budget_tokens: 4095 }
     },
     {
       canonical: { type: 'enabled', budgetTokens: 8191 },
       dynamic: { type: 'adaptive' },
-      expected: { type: 'adaptive' },
-      remainder: 4096
+      expected: { type: 'adaptive' }
     },
     {
       canonical: { type: 'enabled', budgetTokens: 8191 },
       dynamic: { type: 'disabled' },
-      expected: { type: 'disabled' },
-      remainder: 4096
+      expected: { type: 'disabled' }
     },
     {
       canonical: { type: 'enabled', budgetTokens: 8191 },
       dynamic: { type: 'enabled', budgetTokens: 2048 },
-      expected: { type: 'enabled', budget_tokens: 2048 },
-      remainder: 2048
+      expected: { type: 'enabled', budget_tokens: 2048 }
     }
-  ])('uses the SDK dynamic namespace: %j', async ({ canonical, dynamic, expected, remainder }) => {
+  ])('uses the SDK dynamic namespace: %j', async ({ canonical, dynamic, expected }) => {
     const { body, result } = await capture({ max: 4096, canonical, dynamic })
     expect(body.max_tokens).toBe(4096)
     expect(body.thinking).toEqual(expected)
-    expect(result.options.maxOutputTokens).toBe(remainder)
     if (canonical.type === 'enabled')
       expect(result.options.providerOptions?.anthropic?.thinking).toEqual({ type: 'enabled', budgetTokens: 4095 })
     if (dynamic.type === 'enabled')
@@ -1284,9 +1375,18 @@ describe('buildAgentParams standard model parameters', () => {
     })
   })
 
-  it('subtracts the effective API Gateway thinking override from the caller total-token cap', async () => {
+  it('caps the serialized total after the effective thinking override', async () => {
     const { provider, model } = makeSetup(ENDPOINT_TYPE.ANTHROPIC_MESSAGES)
 
+    let body: Record<string, unknown> | undefined
+    const fetch: typeof globalThis.fetch = async (_input, init) => {
+      body = JSON.parse(String(init?.body))
+      throw new Error('thinking request captured')
+    }
+    resolveProviderAiSdkConfigMock.mockResolvedValue({
+      config: { providerId: 'anthropic', providerSettings: { fetch } },
+      credentialReceipt: { attribution: 'unknown' }
+    })
     const result = await buildAgentParams({
       request: {
         conversation: CONVERSATION,
@@ -1305,7 +1405,16 @@ describe('buildAgentParams standard model parameters', () => {
     expect(result.options.providerOptions).toMatchObject({
       anthropic: { thinking: { type: 'enabled', budgetTokens: 4000 } }
     })
-    expect(result.options.maxOutputTokens).toBe(6000)
+    await expect(
+      createAnthropic({ apiKey: 'sk-test', fetch: result.sdkConfig.providerSettings.fetch })
+        .languageModel('claude-sonnet-4-5')
+        .doStream({
+          prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+          maxOutputTokens: result.options.maxOutputTokens,
+          providerOptions: result.options.providerOptions
+        })
+    ).rejects.toThrow('thinking request captured')
+    expect(body).toMatchObject({ max_tokens: 10_000, thinking: { type: 'enabled', budget_tokens: 4000 } })
   })
 
   it('does not apply a model catalog limit to a non-Anthropic endpoint', async () => {
@@ -1326,9 +1435,14 @@ describe('buildAgentParams standard model parameters', () => {
   it.each([
     { providerId: 'anthropic', apiModelId: 'claude-sonnet-4-5' },
     { providerId: 'opencode', apiModelId: 'qwen3.5-plus' }
-  ])('subtracts the additive thinking budget once for $apiModelId', async ({ providerId, apiModelId }) => {
+  ])('caps the serialized total including thinking for $apiModelId', async ({ providerId, apiModelId }) => {
+    let body: Record<string, unknown> | undefined
+    const fetch: typeof globalThis.fetch = async (_input, init) => {
+      body = JSON.parse(String(init?.body))
+      throw new Error('thinking request captured')
+    }
     resolveProviderAiSdkConfigMock.mockResolvedValue({
-      config: { providerId: 'anthropic', providerSettings: {} },
+      config: { providerId: 'anthropic', providerSettings: { fetch } },
       credentialReceipt: { attribution: 'unknown' }
     })
     const provider = makeProvider({
@@ -1368,7 +1482,19 @@ describe('buildAgentParams standard model parameters', () => {
     const thinking = result.options.providerOptions?.anthropic?.thinking as { budgetTokens: number }
 
     expect(thinking.budgetTokens).toBeGreaterThan(0)
-    expect(result.options.maxOutputTokens).toBe(10_000 - thinking.budgetTokens)
+    await expect(
+      createAnthropic({ apiKey: 'sk-test', fetch: result.sdkConfig.providerSettings.fetch })
+        .languageModel(apiModelId)
+        .doStream({
+          prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+          maxOutputTokens: result.options.maxOutputTokens,
+          providerOptions: result.options.providerOptions
+        })
+    ).rejects.toThrow('thinking request captured')
+    expect(body).toMatchObject({
+      max_tokens: 10_000,
+      thinking: { type: 'enabled', budget_tokens: thinking.budgetTokens }
+    })
   })
 
   it('does not subtract an adaptive thinking mode without a budget', async () => {

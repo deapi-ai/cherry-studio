@@ -1,8 +1,53 @@
+import { createAnthropic } from '@ai-sdk/anthropic'
+import type { LanguageModelV3CallOptions } from '@ai-sdk/provider'
 import { describe, expect, it } from 'vitest'
 
+import { createNewApi } from '../../../../provider/custom/newapiProvider'
+import { normalizeAnthropicThinkingOptions } from '../../../../utils/modelParameters'
 import { createThinkingBodyFetch } from '../anthropicThinkingBody'
 
 describe('createThinkingBodyFetch', () => {
+  it.each([
+    { modelId: 'claude-sonnet-5-5', cap: 1025, expectedMax: 1025 },
+    { modelId: 'claude-sonnet-5-5', cap: 4096, expectedMax: 4096 },
+    { modelId: 'claude-sonnet-5-5', cap: 128000, expectedMax: 128000 },
+    { modelId: 'claude-sonnet-5-5', cap: 256000, expectedMax: 128000 },
+    { modelId: 'claude-opus-5-5', cap: 4096, expectedMax: 4096 },
+    { modelId: 'claude-sonnet-5-5', cap: 4096, budget: 4000, expectedMax: 4096 },
+    { modelId: 'claude-fable-5-1', cap: 1025, expectedMax: 1025 },
+    { modelId: 'claude-fable-5-1', cap: 4096, expectedMax: 4096 }
+  ])('keeps the SDK allowance and ceiling when serialization removes budget-based thinking: %j', async (scenario) => {
+    for (const providerId of ['anthropic', 'newapi'] as const) {
+      let body: { max_tokens: number; thinking: { type: string; budget_tokens?: number } } | undefined
+      const inner: typeof globalThis.fetch = async (_input, init) => {
+        body = JSON.parse(String(init?.body))
+        throw new Error('thinking request captured')
+      }
+      const normalized = normalizeAnthropicThinkingOptions(
+        {
+          anthropic: { thinking: { type: 'enabled', ...('budget' in scenario && { budgetTokens: scenario.budget }) } }
+        },
+        providerId,
+        providerId,
+        scenario.cap
+      )
+      const settings = { apiKey: 'sk-test', fetch: createThinkingBodyFetch(inner, scenario.cap) }
+      const model =
+        providerId === 'anthropic'
+          ? createAnthropic(settings).languageModel(scenario.modelId)
+          : createNewApi({ ...settings, endpointType: 'anthropic' }).languageModel(scenario.modelId)
+      const call = {
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+        maxOutputTokens: scenario.cap,
+        providerOptions: normalized.providerOptions
+      } satisfies LanguageModelV3CallOptions
+      await expect(model.doStream(call)).rejects.toThrow('thinking request captured')
+      expect(body?.max_tokens).toBe(scenario.expectedMax)
+      expect(body?.thinking).toEqual({ type: 'adaptive' })
+      expect(body?.thinking.budget_tokens === undefined || body.max_tokens > body.thinking.budget_tokens).toBe(true)
+    }
+  })
+
   // A final body can acquire a raw cap after SDK serialization or encounter a smaller SDK ceiling.
   it.each([
     { max_tokens: 64000, budget: 100000, cap: 128000, expectedMax: 64000, expectedBudget: 63999 },
