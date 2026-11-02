@@ -168,6 +168,7 @@ type SaveAgentSessionMessageParams = {
   runtimeAnchor?: unknown
   runtimeResumeToken?: string
   runtimeStats?: MessageRuntimeStatsInput
+  nativeContextId?: string
   message: CreateAgentSessionMessageDto & {
     delivery?: AgentSessionDeliveryEnvelope
     deliveryStatus?: AgentSessionDeliveryStatus
@@ -592,7 +593,6 @@ export class AgentSessionMessageService {
   }
 
   setEditRuntimeTx(tx: DbOrTx, sessionId: string, userMessageId: string, nativeSessionId: string): void {
-    agentSessionContextService.bindBranchTx(tx, sessionId, userMessageId, nativeSessionId)
     tx.update(sessionMessagesTable)
       .set({ data: sql`json_set(${sessionMessagesTable.data}, '$.nativeSessionId', ${nativeSessionId})` })
       .where(and(eq(sessionMessagesTable.sessionId, sessionId), eq(sessionMessagesTable.id, userMessageId)))
@@ -1494,9 +1494,14 @@ export class AgentSessionMessageService {
     timestampMs = Date.now()
   ): SavedAgentSessionMessage {
     const result = this.upsertMessage(db, params, timestampMs)
-    const checkpoint = RuntimeForkAnchorSchema.safeParse(params.runtimeAnchor)
-    if (params.runtimeResumeToken && checkpoint.success && checkpoint.data.checkpoint.runtime === 'pi') {
-      agentSessionContextService.recordHeadTx(db, params.sessionId, result.entity.id, params.runtimeResumeToken)
+    if (params.nativeContextId && params.runtimeResumeToken) {
+      agentSessionContextService.recordHeadTx(
+        db,
+        params.nativeContextId,
+        params.sessionId,
+        result.entity.id,
+        params.runtimeResumeToken
+      )
     }
     agentSessionService.touchUpdatedAtTx(db, params.sessionId, timestampMs)
     if (result.activityTimestamp !== null) {
