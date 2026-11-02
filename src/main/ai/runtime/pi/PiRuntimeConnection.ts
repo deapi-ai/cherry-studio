@@ -662,7 +662,7 @@ export class PiRuntimeConnection implements AgentRuntimeConnection {
       sessionId,
       message: { id: messageId, role: 'user', data: { parts: [{ type: 'text', text }] } }
     })
-    const draft = messages.prepareSubmission(sessionId, messageId, contextId, 'steer')
+    const draft = prepareNativeSubmission(sessionId, messageId, contextId, 'steer')
     await projection.refresh()
     const result = await handle.input.submit(draft)
     application.get('DbService').withWriteTx((tx) =>
