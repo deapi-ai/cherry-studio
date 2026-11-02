@@ -22,6 +22,7 @@ import { getModelDisplayTags, ModelTag, SubscriptionTag } from '@renderer/compon
 import { DynamicVirtualList, type DynamicVirtualListRef } from '@renderer/components/VirtualList'
 import { useCommandHandler } from '@renderer/hooks/command'
 import { startCherryCloudSubscription } from '@renderer/services/cherryCloudSubscription'
+import { trackSubscriptionEntryView } from '@renderer/services/cherryCloudSubscriptionAnalytics'
 import { openSettingsTab } from '@renderer/services/mainWindowNavigation'
 import { toast } from '@renderer/services/toast'
 import { getModelLogoRef } from '@renderer/utils/model'
@@ -569,6 +570,14 @@ export function ModelSelector(props: ModelSelectorProps) {
     (model: Model, provider?: Provider) => isModelUnavailable(model) || Boolean(isModelDisabled?.(model, provider)),
     [isModelDisabled, isModelUnavailable]
   )
+  const showsLockedRows = modelItems.some((item) => item.locked)
+  const showsSubscribeLink =
+    !subscribedPlanName && listItems.some((item) => item.type === 'group' && item.isCherryAiGroup)
+  useEffect(() => {
+    if (!open) return
+    if (showsLockedRows) trackSubscriptionEntryView('selector_locked_row')
+    if (showsSubscribeLink) trackSubscriptionEntryView('selector_header')
+  }, [open, showsLockedRows, showsSubscribeLink])
   const listItemsRef = useRef(listItems)
   const modelItemsRef = useRef(modelItems)
   const visibleSelectedModelIdSetRef = useRef(visibleSelectedModelIdSet)
@@ -658,7 +667,7 @@ export function ModelSelector(props: ModelSelectorProps) {
     (item: ModelSelectorModelItem) => {
       if (item.locked) {
         setOpen(false)
-        void startCherryCloudSubscription()
+        void startCherryCloudSubscription('selector_locked_row', { modelId: item.model.id })
         return
       }
       if (isSelectionDisabled(item.model, item.provider)) return
@@ -921,7 +930,7 @@ export function ModelSelector(props: ModelSelectorProps) {
                   onClick={(event) => {
                     event.stopPropagation()
                     setOpen(false)
-                    void startCherryCloudSubscription()
+                    void startCherryCloudSubscription('selector_header')
                   }}>
                   {t('settings.subscription.go_to_subscribe')}
                 </button>

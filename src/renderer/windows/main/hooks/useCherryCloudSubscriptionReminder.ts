@@ -5,7 +5,11 @@ import { useSWRConfig } from 'swr'
 import { CHERRY_CLOUD_AVAILABILITY_KEY } from '@renderer/hooks/useCherryCloudModelAvailability'
 import { useCherryCloudPlans } from '@renderer/hooks/useCherryCloudPlans'
 import { useIpcOn } from '@renderer/ipc'
+import { timeSinceSubscribeClick, trackSubscriptionEvent } from '@renderer/services/cherryCloudSubscriptionAnalytics'
 import { toast } from '@renderer/services/toast'
+
+// A plans change this soon after main's notification-driven refresh came from that notification.
+const NOTIFICATION_REFRESH_WINDOW_MS = 15_000
 
 /**
  * Show one light toast when the signed-in account gains a paid entitlement it did not have, e.g.
@@ -20,8 +24,10 @@ export function useCherryCloudSubscriptionReminder(): void {
   const { session, plansQuery, activePaid } = useCherryCloudPlans()
   const accountId = session.status?.phase === 'signed-in' ? session.status.accountId : null
   const lastSnapshotRef = useRef<{ accountId: string; paidEntitlementId: string | null } | null>(null)
+  const notificationRefreshAtRef = useRef(0)
 
   useIpcOn('cherry_cloud.account_refreshed', () => {
+    notificationRefreshAtRef.current = Date.now()
     void plansQuery.mutate()
     void mutate(CHERRY_CLOUD_AVAILABILITY_KEY)
   })
@@ -35,6 +41,15 @@ export function useCherryCloudSubscriptionReminder(): void {
     if (previous?.accountId !== accountId || previous.paidEntitlementId === paidEntitlementId) return
     void mutate(CHERRY_CLOUD_AVAILABILITY_KEY)
     if (activePaid && previous.paidEntitlementId === null) {
+      trackSubscriptionEvent({
+        event: 'subscription_activated',
+        planName: activePaid.plan.display_name,
+        detectedBy:
+          Date.now() - notificationRefreshAtRef.current < NOTIFICATION_REFRESH_WINDOW_MS
+            ? 'notification'
+            : 'focus_refresh',
+        sinceClick: timeSinceSubscribeClick()
+      })
       toast.success(t('settings.subscription.activated', { plan: activePaid.plan.display_name }))
     }
   }, [accountId, activePaid, mutate, plansQuery.data, t])
