@@ -644,7 +644,7 @@ describe('desktop Pi root connection', () => {
     })
     await expect(connect()).rejects.toThrow('configuration changed')
   })
-  it('orders the steer boundary and preserves the two native response associations', async () => {
+  it('orders steer before final input outcomes and preserves both response associations', async () => {
     const release = holdResponse('before steer')
     let reserved = false
     input.onSteerInjected = () => {
@@ -666,10 +666,9 @@ describe('desktop Pi root connection', () => {
     expect(text(events.slice(boundary))).toBe('Hello world')
     const responses = events.flatMap((event) => (event.type === 'input-response' ? [event.input] : []))
     expect(responses.map((response) => response.inputId).sort()).toEqual([first.id, followup.id].sort())
+    expect(responses.map((response) => response.outcome)).toEqual(['completed', 'completed'])
     expect(new Set(responses.map((response) => response.response?.id)).size).toBe(2)
-    expect(
-      events.slice(0, boundary).some((event) => event.type === 'input-response' && event.input.inputId === first.id)
-    ).toBe(true)
+    expect(events.slice(0, boundary).filter((event) => event.type === 'input-response')).toEqual([])
     expect(
       events.slice(boundary).some((event) => event.type === 'input-response' && event.input.inputId === followup.id)
     ).toBe(true)
