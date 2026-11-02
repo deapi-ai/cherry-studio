@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runtimeId } from '@cherrystudio/agent-runtime'
 import { agentSessionTable } from '@data/db/schemas/agentSession'
 import { agentWorkspaceTable } from '@data/db/schemas/agentWorkspace'
-import { agentSessionContextService } from '@data/services/AgentSessionContextService'
 import { agentSessionMessageService } from '@data/services/AgentSessionMessageService'
 import { preparePiBranch } from '@main/ai/runtime/pi/piContext'
 

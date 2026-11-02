@@ -36,7 +36,12 @@ import {
   openNativeContext,
   openPiBackend
 } from '../nativeContext'
-import { observeNativeThread, readNativeSubmission, reconcileDurableMessage } from '../nativeSubmission'
+import {
+  observeNativeThread,
+  prepareNativeSubmission,
+  readNativeSubmission,
+  reconcileDurableMessage
+} from '../nativeSubmission'
 
 function confirmed<T>(result: OperationResult<T>): T {
   if (result.status !== 'confirmed') throw new Error(result.error.message)
@@ -231,6 +236,24 @@ describe('native context storage and reconciliation', () => {
     expect(faux.state.callCount).toBe(0)
     messages.updateSessionMessage(sessionId, id, { data: { parts: [{ type: 'text', text: 'corrected' }] } })
     expect(messages.getSessionMessage(sessionId, id).data.parts).toEqual([{ type: 'text', text: 'corrected' }])
+  })
+
+  it('rejects a prepared payload if its retained message changed before submission', async () => {
+    const { backend, runtime, options, faux } = await pi()
+    const created = await createPiContext(sessionId, backend.id, runtime, options)
+    const id = message('original')
+    const parts = messages.getSessionMessage(sessionId, id).data.parts
+    messages.updateSessionMessage(sessionId, id, { data: { parts: [{ type: 'text', text: 'edited' }] } })
+    expect(() =>
+      prepareNativeSubmission(sessionId, id, created.context.id, 'reject', { text: 'wrapped original', parts })
+    ).toThrow('content changed')
+    expect(messages.hasSubmission(sessionId, id)).toBe(false)
+    expect(faux.state.callCount).toBe(0)
+    const draft = prepareNativeSubmission(sessionId, id, created.context.id, 'reject', {
+      text: 'wrapped edited',
+      parts: [{ type: 'text', text: 'edited' }]
+    })
+    expect(draft).toEqual({ inputId: id, text: 'wrapped edited', whenBusy: 'reject' })
   })
 
   it.each(['read', 'write'] as const)(
